@@ -16,26 +16,44 @@
 #
 #  Author: Mauro Soria
 
+import re
 import threading
-
-import urllib.error
 import urllib.parse
-import urllib.request
 
-from lib.utils.FileUtils import File
-from thirdparty.oset import *
+from lib.utils.file_utils import File
 
 
 class Dictionary(object):
 
-    def __init__(self, paths, extensions, lowercase=False, forcedExtensions=False):
+    def __init__(
+        self,
+        paths,
+        extensions,
+        suffixes=None,
+        prefixes=None,
+        lowercase=False,
+        uppercase=False,
+        capitalization=False,
+        forcedExtensions=False,
+        excludeExtensions=[],
+        noExtension=False,
+        onlySelected=False,
+    ):
+
         self.entries = []
         self.currentIndex = 0
         self.condition = threading.Lock()
         self._extensions = extensions
+        self._excludeExtensions = excludeExtensions
+        self._prefixes = prefixes
+        self._suffixes = suffixes
         self._paths = paths
         self._forcedExtensions = forcedExtensions
+        self._noExtension = noExtension
+        self._onlySelected = onlySelected
         self.lowercase = lowercase
+        self.uppercase = uppercase
+        self.capitalization = capitalization
         self.dictionaryFiles = [File(path) for path in self.paths]
         self.generate()
 
@@ -57,7 +75,7 @@ class Dictionary(object):
 
     @classmethod
     def quote(cls, string):
-        return urllib.parse.quote(string, safe=":/~?%&+-=$")
+        return urllib.parse.quote(string, safe="!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 
     """
     Dictionary.generate() behaviour
@@ -77,57 +95,111 @@ class Dictionary(object):
     """
 
     def generate(self):
+        reext = re.compile(r"\%ext\%", re.IGNORECASE).sub
+        renoforce = re.compile(r"\%noforce\%", re.IGNORECASE).sub
+        find = re.findall
+        custom = []
         result = []
+
         # Enable to use multiple dictionaries at once
         for dictFile in self.dictionaryFiles:
-            for line in dictFile.getLines():
-
+            for line in list(filter(None, dict.fromkeys(dictFile.get_lines()))):
                 # Skip comments
                 if line.lstrip().startswith("#"):
                     continue
 
+                if line.startswith("/"):
+                    line = line[1:]
+
+                if self._noExtension:
+                    line = line[0] + line[1:].split(".")[0]
+                    if line == ".":
+                        continue
+
+                # Check if the line has the %NOFORCE% keyword
+                if "%noforce%" in line.lower():
+                    noforce = True
+                    line = renoforce("", line)
+                else:
+                    noforce = False
+
+                # Skip if the path contains excluded extensions
+                if self._excludeExtensions:
+                    if any(
+                        [find("." + extension, line) for extension in self._excludeExtensions]
+                    ):
+                        continue
+
                 # Classic dirsearch wordlist processing (with %EXT% keyword)
-                if '%EXT%' in line or '%ext%' in line:
+                if "%ext%" in line.lower():
                     for extension in self._extensions:
-                        if '%EXT%' in line:
-                            newline = line.replace('%EXT%', extension)
+                        newline = reext(extension, line)
 
-                        if '%ext%' in line:
-                            newline = line.replace('%ext%', extension)
-
-                        quote = self.quote(newline)
-                        result.append(quote)
+                        quoted = self.quote(newline)
+                        result.append(quoted)
 
                 # If forced extensions is used and the path is not a directory ... (terminated by /)
                 # process line like a forced extension.
-                elif self._forcedExtensions and not line.rstrip().endswith("/"):
+                elif self._forcedExtensions and not line.rstrip().endswith("/") and not noforce:
                     quoted = self.quote(line)
 
                     for extension in self._extensions:
-                        # Why? check https://github.com/maurosoria/dirsearch/issues/70
-                        if extension.strip() == '':
+                        # Why? Check https://github.com/maurosoria/dirsearch/issues/70
+                        if not extension.strip():
                             result.append(quoted)
                         else:
-                            result.append(quoted + '.' + extension)
+                            result.append(quoted + "." + extension)
 
-                    if quoted.strip() not in ['']:
-                        result.append(quoted + "/")
+                    result.append(quoted)
+                    result.append(quoted + "/")
 
                 # Append line unmodified.
                 else:
-                    result.append(self.quote(line))
+                    quoted = self.quote(line)
 
-        # oset library provides inserted ordered and unique collection.
+                    if self._onlySelected and not line.rstrip().endswith("/") and "." in line:
+                        for extension in self._extensions:
+                            if line.endswith("." + extension):
+                                result.append(quoted)
+                                break
+
+                    else:
+                        result.append(quoted)
+
+        # Adding prefixes for finding config files etc
+        if self._prefixes:
+            for res in list(dict.fromkeys(result)):
+                for pref in self._prefixes:
+                    if not res.startswith(pref):
+                        custom.append(pref + res)
+
+        # Adding suffixes for finding backups etc
+        if self._suffixes:
+            for res in list(dict.fromkeys(result)):
+                if not res.rstrip().endswith("/"):
+                    for suff in self._suffixes:
+                        if not res.rstrip().endswith(suff):
+                            custom.append(res + suff)
+
+        result = custom if custom else result
+
         if self.lowercase:
-            self.entries = list(oset(map(lambda l: l.lower(), result)))
+            self.entries = list(dict.fromkeys(map(lambda l: l.lower(), result)))
+
+        elif self.uppercase:
+            self.entries = list(dict.fromkeys(map(lambda l: l.upper(), result)))
+
+        elif self.capitalization:
+            self.entries = list(dict.fromkeys(map(lambda l: l.capitalize(), result)))
 
         else:
-            self.entries = list(oset(result))
+            self.entries = list(dict.fromkeys(result))
 
-        del (result)
+        del custom
+        del result
 
     def regenerate(self):
-        self.generate(lowercase=self.lowercase)
+        self.generate()
         self.reset()
 
     def nextWithIndex(self, basePath=None):

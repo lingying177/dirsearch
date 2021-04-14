@@ -16,14 +16,27 @@
 #
 #  Author: Mauro Soria
 
-import random
-import string
+import threading
 
 
-class RandomUtils(object):
-    @classmethod
-    def randString(cls, n=12, omit=None):
-        seq = string.ascii_lowercase + string.ascii_uppercase + string.digits
-        if omit:
-            seq = list(set(seq) - set(omit))
-        return ''.join(random.choice(seq) for _ in range(n))
+class ReportManager(object):
+    def __init__(self):
+        self.outputs = []
+        self.lock = threading.Lock()
+
+    def addOutput(self, output):
+        self.outputs.append(output)
+
+    def addPath(self, path, status, response):
+        with self.lock:
+            for output in self.outputs:
+                output.addPath(path, status, response)
+
+    def save(self):
+        with self.lock:
+            for output in self.outputs:
+                output.save()
+
+    def close(self):
+        for output in self.outputs:
+            output.close()
